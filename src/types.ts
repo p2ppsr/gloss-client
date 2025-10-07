@@ -1,0 +1,85 @@
+import { WalletInterface } from '@bsv/sdk';
+
+/**
+ * Configuration options for GlossClient
+ */
+export interface GlossConfig {
+  /** Wallet interface for BSV operations */
+  wallet?: WalletInterface;
+  /** BSV network to use */
+  networkPreset?: 'mainnet' | 'testnet';
+  /** Custom wallet host (if using WalletClient) */
+  walletHost?: string;
+  /** Wallet mode (if using WalletClient) */
+  walletMode?: 'auto' | 'json-api';
+}
+
+/**
+ * A log entry in the global gloss system
+ */
+export interface LogEntry {
+  /** Date key for the day (e.g., "2025-10-06") */
+  key: string;
+  /** ISO timestamp when the log was created */
+  at: string;
+  /** The log message text */
+  text: string;
+  /** Optional tags for categorization */
+  tags?: string[];
+  /** Optional UHRP URLs for attached assets */
+  assets?: string[];
+  /** Identity key of who created this log (for filtering) */
+  controller?: string;
+}
+
+/**
+ * A day's worth of logs stored as a chain
+ */
+export interface DayChain {
+  /** Date key (e.g., "2025-10-06") */
+  key: string;
+  /** All log entries for this day, chronologically ordered */
+  logs: LogEntry[];
+}
+
+/**
+ * Options for creating a log entry
+ */
+export interface CreateLogOptions {
+  /** Optional tags for the log entry */
+  tags?: string[];
+  /** Optional asset URLs to attach */
+  assets?: string[];
+}
+
+/**
+ * Options for querying logs
+ */
+export interface QueryOptions {
+  /** Filter by specific controller (identity key) */
+  controller?: string;
+  /** Filter by tags */
+  tags?: string[];
+  /** Maximum number of entries to return */
+  limit?: number;
+}
+
+/**
+ * Result from uploading an asset
+ */
+export interface UploadResult {
+  /** The UHRP URL of the uploaded asset */
+  uhrpURL: string;
+  /** Whether the upload was published successfully */
+  published: boolean;
+}
+
+/**
+ * Options for uploading assets
+ */
+export interface UploadOptions {
+  /** UHRP storage URL */
+  storageURL?: string;
+  /** Retention period in minutes */
+  retentionMinutes?: number;
+}

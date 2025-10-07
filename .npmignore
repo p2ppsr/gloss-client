@@ -1,0 +1,42 @@
+# Source files
+src/
+tsconfig.json
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Tests
+test/
+tests/
+__tests__/
+*.test.ts
+*.spec.ts
+
+# Build artifacts that shouldn't be published
+.tsbuildinfo
+
+# Git
+.git/
+.gitignore
+
+# CI/CD
+.github/
+.travis.yml
+.circleci/
+
+# Documentation source
+docs/
+
+# Environment files
+.env*
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db

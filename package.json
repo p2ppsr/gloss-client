@@ -1,0 +1,51 @@
+{
+  "name": "gloss-client",
+  "version": "0.4.1",
+  "description": "Global developer logging SDK with individual UTXO architecture for granular log management on BSV blockchain",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "prepublishOnly": "npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "bsv",
+    "blockchain",
+    "logging",
+    "developer-tools",
+    "kvstore",
+    "global",
+    "discoverable"
+  ],
+  "author": "P2PPSR",
+  "license": "Open BSV License",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/p2ppsr/gloss-logs.git"
+  },
+  "peerDependencies": {
+    "@bsv/sdk": "^1.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^1.8.2"
+  }
+}
