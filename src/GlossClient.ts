@@ -35,10 +35,10 @@ export class GlossClient {
   constructor(config: GlossConfig = {}) {
     // Set defaults
     this.config = {
-      wallet: config.wallet ?? new WalletClient('auto', config.walletHost ?? 'http://localhost'),
+      // Handle special case where running local requires explicit originator
+      wallet: config.wallet ?? new WalletClient('auto', config.walletMode === 'local' ? 'http://localhost' : undefined),
       networkPreset: config.networkPreset ?? 'mainnet',
-      walletMode: config.walletMode ?? 'auto',
-      walletHost: config.walletHost ?? 'http://localhost'
+      walletMode: config.walletMode ?? 'auto'
     };
 
     // Initialize GlobalKVStore

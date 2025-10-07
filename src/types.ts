@@ -9,8 +9,7 @@ export interface GlossConfig {
   /** BSV network to use */
   networkPreset?: 'mainnet' | 'testnet';
   /** Wallet mode (if using WalletClient) */
-  walletMode?: 'auto' | 'json-api';
-  walletHost?: string
+  walletMode?: 'auto' | 'local';
 }
 
 /**
