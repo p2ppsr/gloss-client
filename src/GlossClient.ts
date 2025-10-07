@@ -9,7 +9,7 @@ import {
 } from './types.js';
 
 // Protocol identifier for gloss logs
-const GLOSS_PROTOCOL_ID: WalletProtocol = [1, 'gloss logs']
+const GLOSS_PROTOCOL_ID: WalletProtocol = [1, 'gloss logs'];
 
 /**
  * GlossClient - Global developer logging client
@@ -23,8 +23,9 @@ const GLOSS_PROTOCOL_ID: WalletProtocol = [1, 'gloss logs']
  * Key format (UTC):
  *   entry/{YYYY-MM-DD}/{HHmmss-SSS<rand>}
  *
- * Pagination:
- *   listDay(date, { limit, skip, sortOrder }) -> forwards to GlobalKVStore.get
+ * Discovery & Pagination:
+ *   GlobalKVStore does NOT support key-prefix queries. listDay() scans by protocolID
+ *   with paging (limit/skip) and filters client-side by date (and optional tags/controller).
  */
 export class GlossClient {
   private kv: GlobalKVStore;
@@ -34,11 +35,10 @@ export class GlossClient {
   constructor(config: GlossConfig = {}) {
     // Set defaults
     this.config = {
-      wallet:
-        config.wallet ??
-        new WalletClient(),
+      wallet: config.wallet ?? new WalletClient('auto', config.walletHost ?? 'http://localhost'),
       networkPreset: config.networkPreset ?? 'mainnet',
-      walletMode: config.walletMode ?? 'auto'
+      walletMode: config.walletMode ?? 'auto',
+      walletHost: config.walletHost ?? 'http://localhost'
     };
 
     // Initialize GlobalKVStore
@@ -55,7 +55,7 @@ export class GlossClient {
   }
 
   /**
-   * Initialize and memoize the identity key (called automatically when needed)
+   * Initialize and memoize the identity key (called automatically when needed).
    */
   private async ensureIdentityKey(): Promise<string> {
     if (!this.identityKey) {
@@ -66,7 +66,7 @@ export class GlossClient {
   }
 
   /**
-   * Create a new log entry (UTC date & time)
+   * Create a new log entry (UTC date & time).
    *
    * @param text - The log message
    * @param options - Optional configuration
@@ -75,11 +75,11 @@ export class GlossClient {
   async log(text: string, options: CreateLogOptions = {}): Promise<LogEntry> {
     const now = new Date();
     const day = now.toISOString().slice(0, 10); // YYYY-MM-DD in UTC
-    const key = await this.nextIdForDay(day);   // entry/YYYY-MM-DD/HHmmss-SSS<rand>
+    const key = this.nextIdForDay(day);         // entry/YYYY-MM-DD/HHmmss-SSS<rand>
 
     const entry: LogEntry = {
       key,
-      at: now.toISOString(), // UTC timestamp
+      at: now.toISOString(), // UTC ISO timestamp
       text,
       tags: options.tags ?? [],
       assets: options.assets ?? []
@@ -101,70 +101,73 @@ export class GlossClient {
 
   /**
    * List all log entries for a specific UTC date from all users.
-   * Uses server-side pagination if the store supports key-prefix on `key`.
    *
-   * @param date - Date in YYYY-MM-DD (UTC) format
-   * @param options - Optional filters and pagination
-   *   - controller?: string (identity pubkey filter, client-side)
-   *   - tags?: string[] (any-of match, client-side)
-   *   - limit?: number (paged by store)
-   *   - skip?: number (paged by store)
-   *   - sortOrder?: 'asc' | 'desc' (store sort)
-   * @returns entries sorted by store order or by key fallback
+   * NOTE: GlobalKVStore.get() cannot prefix-match the key.
+   * We page across protocol results (limit/skip) and filter by the date key prefix client-side.
+   *
+   * @param date - YYYY-MM-DD (UTC)
+   * @param options - Optional filters and pagination (see QueryOptions)
+   * @returns entries sorted by key (chronological in UTC)
    */
-  async listDay(
-    date: string,
-    options: QueryOptions = {}
-  ): Promise<LogEntry[]> {
+  async listDay(date: string, options: QueryOptions = {}): Promise<LogEntry[]> {
     const keyPrefix = `entry/${date}/`;
 
-    // Ask the store to filter by protocol and prefix (if supported), and paginate
-    const result = await this.kv.get(
-      {
-        protocolID: GLOSS_PROTOCOL_ID,
-        key: keyPrefix,
-        limit: options.limit,
-        skip: options.skip,
-        sortOrder: options.sortOrder ?? 'asc'
-      }
-    );
+    // Store-page scan controls (with guardrails)
+    const pageSize = Math.max(1, Math.min(options.pageSize ?? 500, 2000));
+    const maxPages = Math.max(1, options.maxPages ?? 20);
+    const want = options.limit && options.limit > 0 ? options.limit : undefined;
 
-    const collected: LogEntry[] = [];
+    let skip = Math.max(0, options.skip ?? 0);
+    const out: LogEntry[] = [];
 
-    const pushIfValid = (rec: any) => {
+    const consider = (rec: any) => {
       if (!rec?.value || typeof rec.value !== 'string') return;
-      if (!rec.key?.startsWith(keyPrefix)) return; // defensive
+      if (!rec.key?.startsWith(keyPrefix)) return;
       try {
-        const parsed = JSON.parse(rec.value) as LogEntry;
-        if (rec.controller) parsed.controller = rec.controller;
-        collected.push(parsed);
+        const e = JSON.parse(rec.value) as LogEntry;
+        if (rec.controller) e.controller = rec.controller;
+        out.push(e);
       } catch {
         // ignore malformed entries
       }
     };
 
-    if (Array.isArray(result)) {
-      for (const r of result) pushIfValid(r);
-    } else if (result) {
-      pushIfValid(result);
+    for (let page = 0; page < maxPages; page++) {
+      const res = await this.kv.get({
+        protocolID: GLOSS_PROTOCOL_ID,
+        limit: pageSize,
+        skip,
+        sortOrder: options.sortOrder ?? 'asc'
+      });
+
+      const rows = Array.isArray(res) ? res : res ? [res] : [];
+      if (rows.length === 0) break;
+
+      for (const r of rows) consider(r);
+
+      if (want && out.length >= want) break;
+      skip += rows.length;
     }
 
     // Client-side filters
-    let filtered = collected;
+    let filtered = out;
 
     if (options.controller) {
       filtered = filtered.filter(e => e.controller === options.controller);
     }
-
     if (options.tags?.length) {
       filtered = filtered.filter(e => e.tags?.some(t => options.tags!.includes(t)));
     }
 
-    // If store sort is unknown, sort by key’s timestamp segment (stable UTC)
-    // key = entry/YYYY-MM-DD/HHmmss-SSSxxxx ; lexicographic = chronological
-    if (!options.sortOrder) {
-      filtered.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    // Sort by key (lexicographic aligns with UTC timestamp segment)
+    if ((options.sortOrder ?? 'asc') === 'asc') {
+      filtered.sort((a, b) => a.key.localeCompare(b.key));
+    } else {
+      filtered.sort((a, b) => b.key.localeCompare(a.key));
     }
+
+    // Apply final limit after filtering
+    if (want) filtered = filtered.slice(0, want);
 
     return filtered;
   }
@@ -172,9 +175,7 @@ export class GlossClient {
   /**
    * List today's log entries from all users (UTC "today").
    */
-  async listToday(
-    options: QueryOptions & { skip?: number; sortOrder?: 'asc' | 'desc' } = {}
-  ): Promise<LogEntry[]> {
+  async listToday(options: QueryOptions = {}): Promise<LogEntry[]> {
     const today = new Date().toISOString().slice(0, 10);
     return this.listDay(today, options);
   }
@@ -184,12 +185,20 @@ export class GlossClient {
    * Only the controller (creator) can remove their own logs.
    *
    * @param logKey - Full log key (e.g., "2025-10-07/143022-456abcd")
-   * @returns true if removed
+   * @returns true if removed; false if not found or not owned
    */
   async removeEntry(logKey: string): Promise<boolean> {
     const identityKey = await this.ensureIdentityKey();
     const datePart = logKey.split('/')[0];
-    const myEntries = await this.listDay(datePart, { controller: identityKey, limit: 1000 });
+
+    // Scan enough to likely include the target (tune maxPages/pageSize if your day is heavy)
+    const myEntries = await this.listDay(datePart, {
+      controller: identityKey,
+      limit: 10000,
+      pageSize: 500,
+      maxPages: 40,
+      sortOrder: 'asc'
+    });
 
     const entry = myEntries.find(e => e.key === logKey);
     if (!entry) return false;
@@ -206,17 +215,19 @@ export class GlossClient {
    */
   async removeDay(date: string): Promise<boolean> {
     const identityKey = await this.ensureIdentityKey();
-
-    // Page through your entries for the day
-    let skip = 0;
-    const pageSize = 200;
     let removedAny = false;
+
+    // Iterate pages until we stop seeing results
+    let skip = 0;
+    const pageSize = 500;
 
     while (true) {
       const page = await this.listDay(date, {
         controller: identityKey,
-        limit: pageSize,
+        limit: pageSize,  // desired results after filtering
         skip,
+        pageSize,         // store page size
+        maxPages: 1,      // scan exactly one store page per loop
         sortOrder: 'asc'
       });
 
@@ -227,8 +238,7 @@ export class GlossClient {
         removedAny = true;
       }
 
-      if (page.length < pageSize) break;
-      skip += page.length;
+      skip += pageSize;
     }
 
     return removedAny;
@@ -305,7 +315,7 @@ export class GlossClient {
       ingest(result);
     }
 
-    // Sort newest first by `at` (ISO). Fallback to key.
+    // Sort newest first by `at` (ISO). Fallback to key (descending).
     history.sort((a, b) => {
       const atA = a.at ?? '';
       const atB = b.at ?? '';
@@ -317,7 +327,9 @@ export class GlossClient {
   }
 
   /**
-   * Upload an asset to UHRP storage and get the URL
+   * Upload an asset to UHRP storage and get the URL.
+   *
+   * retentionMinutes are minutes (default 30 days).
    */
   async uploadAsset(
     data: Uint8Array,
@@ -341,7 +353,7 @@ export class GlossClient {
   }
 
   /**
-   * Create a log entry with an uploaded asset
+   * Create a log entry with an uploaded asset.
    */
   async logWithAsset(
     text: string,
@@ -358,10 +370,10 @@ export class GlossClient {
   }
 
   /**
-   * Generate a unique UTC log key (internal)
+   * Generate a unique UTC log key (internal).
    * Format: YYYY-MM-DD/HHmmss-SSS<rand>
    */
-  private async nextIdForDay(yyyyMmDd: string): Promise<string> {
+  private nextIdForDay(yyyyMmDd: string): string {
     const now = new Date();
     const hours = String(now.getUTCHours()).padStart(2, '0');
     const minutes = String(now.getUTCMinutes()).padStart(2, '0');
@@ -372,7 +384,7 @@ export class GlossClient {
   }
 
   /**
-   * Store a log entry (internal)
+   * Store a log entry (internal).
    * Each call spends/replaces the previous UTXO for this key lineage.
    */
   private async putEntry(entry: LogEntry): Promise<void> {

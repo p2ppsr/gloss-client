@@ -10,6 +10,7 @@ export interface GlossConfig {
   networkPreset?: 'mainnet' | 'testnet';
   /** Wallet mode (if using WalletClient) */
   walletMode?: 'auto' | 'json-api';
+  walletHost?: string
 }
 
 /**
@@ -54,14 +55,18 @@ export interface CreateLogOptions {
  * Options for querying logs
  */
 export interface QueryOptions {
-  /** Filter by specific controller (identity key) */
   controller?: string;
-  /** Filter by tags */
   tags?: string[];
-  /** Maximum number of entries to return */
-  limit?: number
-  skip?: number
-  sortOrder?: 'asc' | 'desc'
+  // desired number of results returned to the caller, after filtering
+  limit?: number;
+  // initial offset into the global protocol stream
+  skip?: number;
+  // store-level sort request
+  sortOrder?: 'asc' | 'desc';
+  // how many rows to fetch per store scan page
+  pageSize?: number;
+  // hard cap on store pages to scan
+  maxPages?: number;
 }
 
 /**

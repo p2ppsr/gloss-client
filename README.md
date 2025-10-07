@@ -233,7 +233,7 @@ export interface UploadResult {
 * **Protocol ID:** `[1, 'gloss logs']`
 * **Key space:** `entry/{YYYY-MM-DD}/{HHmmss-SSSxxxx}` (UTC timestamp-based; no counters)
 * **Storage:** each `set` writes a new UTXO; updates spend the previous one
-* **Discovery:** `kv.get({ protocolID: [1, 'gloss logs'] })` enumerates all entries; clients then filter by date/prefix
+* **Discovery:** `kv.get({ protocolID: [1, 'gloss logs'] })` enumerates all entries; clients filter by **date** client‑side (prefix lookups are not supported).
 * **Pagination:** via `limit`, `skip`, and `sortOrder` in `GlobalKVStore.get`
 
 ---
