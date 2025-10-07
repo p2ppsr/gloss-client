@@ -1,41 +1,30 @@
-import { GlobalKVStore, WalletClient, StorageUploader } from '@bsv/sdk';
-import { GlossConfig, LogEntry, DayChain, CreateLogOptions, QueryOptions, UploadResult, UploadOptions } from './types.js';
+import { GlobalKVStore, WalletClient, StorageUploader, WalletProtocol } from '@bsv/sdk';
+import {
+  GlossConfig,
+  LogEntry,
+  CreateLogOptions,
+  QueryOptions,
+  UploadResult,
+  UploadOptions
+} from './types.js';
 
 // Protocol identifier for gloss logs
-const GLOSS_PROTOCOL_ID: [1, 'gloss logs'] = [1, 'gloss logs'];
+const GLOSS_PROTOCOL_ID: WalletProtocol = [1, 'gloss logs']
 
 /**
  * GlossClient - Global developer logging client
- * 
+ *
  * Creates globally discoverable developer logs using BSV blockchain and GlobalKVStore.
  * Each log entry is stored as an individual UTXO enabling granular operations:
  * - Individual log removal
- * - Log updates with history preservation  
- * - Parallel logging without conflicts
+ * - Log updates with history preservation
  * - True blockchain audit trails
- * 
- * @example
- * ```typescript
- * const gloss = new GlossClient();
- * 
- * // Create a log entry
- * const entry = await gloss.log('Fixed user authentication bug', { 
- *   tags: ['auth', 'bugfix'] 
- * });
- * 
- * // Update the log entry
- * await gloss.updateEntry('2025-10-07', 'Fixed user authentication bug', 
- *   'Fixed user authentication and authorization bugs');
- * 
- * // View update history
- * const history = await gloss.getLogHistory(entry.key);
- * 
- * // List today's logs from all users
- * const todayLogs = await gloss.listToday();
- * 
- * // Remove a specific log
- * await gloss.removeEntry('2025-10-07', 'Some message to remove');
- * ```
+ *
+ * Key format (UTC):
+ *   entry/{YYYY-MM-DD}/{HHmmss-SSS<rand>}
+ *
+ * Pagination:
+ *   listDay(date, { limit, skip, sortOrder }) -> forwards to GlobalKVStore.get
  */
 export class GlossClient {
   private kv: GlobalKVStore;
@@ -45,9 +34,10 @@ export class GlossClient {
   constructor(config: GlossConfig = {}) {
     // Set defaults
     this.config = {
-      wallet: config.wallet ?? new WalletClient(config.walletMode ?? 'auto', `http://${config.walletHost ?? 'localhost'}`),
+      wallet:
+        config.wallet ??
+        new WalletClient(),
       networkPreset: config.networkPreset ?? 'mainnet',
-      walletHost: config.walletHost ?? 'localhost',
       walletMode: config.walletMode ?? 'auto'
     };
 
@@ -65,7 +55,7 @@ export class GlossClient {
   }
 
   /**
-   * Initialize the identity key (called automatically when needed)
+   * Initialize and memoize the identity key (called automatically when needed)
    */
   private async ensureIdentityKey(): Promise<string> {
     if (!this.identityKey) {
@@ -76,19 +66,20 @@ export class GlossClient {
   }
 
   /**
-   * Create a new log entry
-   * 
+   * Create a new log entry (UTC date & time)
+   *
    * @param text - The log message
    * @param options - Optional configuration
-   * @returns Promise resolving to the created log entry
+   * @returns The created log entry
    */
   async log(text: string, options: CreateLogOptions = {}): Promise<LogEntry> {
-    const day = new Date().toISOString().slice(0, 10);
-    const key = await this.nextIdForDay(day); // Returns the day itself
+    const now = new Date();
+    const day = now.toISOString().slice(0, 10); // YYYY-MM-DD in UTC
+    const key = await this.nextIdForDay(day);   // entry/YYYY-MM-DD/HHmmss-SSS<rand>
 
     const entry: LogEntry = {
       key,
-      at: new Date().toISOString(),
+      at: now.toISOString(), // UTC timestamp
       text,
       tags: options.tags ?? [],
       assets: options.assets ?? []
@@ -99,211 +90,189 @@ export class GlossClient {
   }
 
   /**
-   * Get all log entries for a specific date reconstructed from spend chain
-   * 
-   * @param key - The date key (e.g., "2025-10-06")
-   * @returns Promise resolving to array of log entries for that date
+   * Get all log entries for a specific UTC date.
+   * Alias for listDay(date).
+   *
+   * @param date - Date in YYYY-MM-DD (UTC) format
    */
-  async get(key: string): Promise<LogEntry[]> {
-    return this.listDay(key);
+  async get(date: string): Promise<LogEntry[]> {
+    return this.listDay(date);
   }
 
   /**
-   * List all log entries for a specific date from all users
-   * Queries individual log UTXOs using protocolID
-   * 
-   * @param date - Date in YYYY-MM-DD format
-   * @param options - Optional query filters
-   * @returns Promise resolving to array of log entries, sorted chronologically
+   * List all log entries for a specific UTC date from all users.
+   * Uses server-side pagination if the store supports key-prefix on `key`.
+   *
+   * @param date - Date in YYYY-MM-DD (UTC) format
+   * @param options - Optional filters and pagination
+   *   - controller?: string (identity pubkey filter, client-side)
+   *   - tags?: string[] (any-of match, client-side)
+   *   - limit?: number (paged by store)
+   *   - skip?: number (paged by store)
+   *   - sortOrder?: 'asc' | 'desc' (store sort)
+   * @returns entries sorted by store order or by key fallback
    */
-  async listDay(date: string, options: QueryOptions = {}): Promise<LogEntry[]> {
-    // Query all logs using protocolID to get all gloss logs, then filter by date
-    const result = await this.kv.get({ protocolID: GLOSS_PROTOCOL_ID });
+  async listDay(
+    date: string,
+    options: QueryOptions = {}
+  ): Promise<LogEntry[]> {
+    const keyPrefix = `entry/${date}/`;
 
-    const allEntries: LogEntry[] = [];
+    // Ask the store to filter by protocol and prefix (if supported), and paginate
+    const result = await this.kv.get(
+      {
+        protocolID: GLOSS_PROTOCOL_ID,
+        key: keyPrefix,
+        limit: options.limit,
+        skip: options.skip,
+        sortOrder: options.sortOrder ?? 'asc'
+      }
+    );
+
+    const collected: LogEntry[] = [];
+
+    const pushIfValid = (rec: any) => {
+      if (!rec?.value || typeof rec.value !== 'string') return;
+      if (!rec.key?.startsWith(keyPrefix)) return; // defensive
+      try {
+        const parsed = JSON.parse(rec.value) as LogEntry;
+        if (rec.controller) parsed.controller = rec.controller;
+        collected.push(parsed);
+      } catch {
+        // ignore malformed entries
+      }
+    };
 
     if (Array.isArray(result)) {
-      // Multiple log entries found
-      for (const logResult of result) {
-        if (logResult.key?.startsWith(`entry/${date}/`) && logResult.value) {
-          try {
-            const logEntry = JSON.parse(logResult.value) as LogEntry;
-            if (logResult.controller) {
-              logEntry.controller = logResult.controller;
-            }
-            allEntries.push(logEntry);
-          } catch (e) {
-            console.warn(`Failed to parse log entry: ${logResult.key}`, e);
-          }
-        }
-      }
-    } else if (result?.key?.startsWith(`entry/${date}/`) && result?.value) {
-      // Single log entry found
-      try {
-        const logEntry = JSON.parse(result.value) as LogEntry;
-        if (result.controller) {
-          logEntry.controller = result.controller;
-        }
-        allEntries.push(logEntry);
-      } catch (e) {
-        console.warn(`Failed to parse log entry: ${result.key}`, e);
-      }
+      for (const r of result) pushIfValid(r);
+    } else if (result) {
+      pushIfValid(result);
     }
 
-    // Apply filters
-    let filtered = allEntries;
+    // Client-side filters
+    let filtered = collected;
 
     if (options.controller) {
-      filtered = filtered.filter(entry => entry.controller === options.controller);
+      filtered = filtered.filter(e => e.controller === options.controller);
     }
 
-    if (options.tags && options.tags.length > 0) {
-      filtered = filtered.filter(entry =>
-        entry.tags?.some(tag => options.tags!.includes(tag))
-      );
+    if (options.tags?.length) {
+      filtered = filtered.filter(e => e.tags?.some(t => options.tags!.includes(t)));
     }
 
-    // Sort by timestamp
-    filtered.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
-
-    // Apply limit
-    if (options.limit && options.limit > 0) {
-      filtered = filtered.slice(0, options.limit);
+    // If store sort is unknown, sort by key’s timestamp segment (stable UTC)
+    // key = entry/YYYY-MM-DD/HHmmss-SSSxxxx ; lexicographic = chronological
+    if (!options.sortOrder) {
+      filtered.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     }
 
     return filtered;
   }
 
   /**
-   * List today's log entries from all users
-   * 
-   * @param options - Optional query filters
-   * @returns Promise resolving to array of today's log entries
+   * List today's log entries from all users (UTC "today").
    */
-  async listToday(options: QueryOptions = {}): Promise<LogEntry[]> {
+  async listToday(
+    options: QueryOptions & { skip?: number; sortOrder?: 'asc' | 'desc' } = {}
+  ): Promise<LogEntry[]> {
     const today = new Date().toISOString().slice(0, 10);
     return this.listDay(today, options);
   }
 
   /**
-   * Remove a specific log entry by unique key or date+text
-   * Only the controller (creator) can remove their own logs
-   * 
-   * @param keyOrDate - Either full log key (e.g., "2025-10-07/143022-456") or date (e.g., "2025-10-07") 
-   * @param entryText - Text of entry to remove (only needed if keyOrDate is a date)
-   * @returns Promise resolving to true if removed, false if not found
+   * Remove a specific log entry by its full key.
+   * Only the controller (creator) can remove their own logs.
+   *
+   * @param logKey - Full log key (e.g., "2025-10-07/143022-456abcd")
+   * @returns true if removed
    */
-  async removeEntry(keyOrDate: string, entryText?: string): Promise<boolean> {
+  async removeEntry(logKey: string): Promise<boolean> {
     const identityKey = await this.ensureIdentityKey();
-    
-    let entryToRemove: LogEntry | undefined;
-    let entryKey: string;
+    const datePart = logKey.split('/')[0];
+    const myEntries = await this.listDay(datePart, { controller: identityKey, limit: 1000 });
 
-    if (keyOrDate.includes('/') && !entryText) {
-      // Format: "2025-10-07/143022-456" (unique key)
-      const [datePart] = keyOrDate.split('/');
-      const currentEntries = await this.listDay(datePart, { controller: identityKey });
-      
-      entryToRemove = currentEntries.find(entry => entry.key === keyOrDate);
-      entryKey = `entry/${keyOrDate}`;
-    } else if (entryText) {
-      // Format: "2025-10-07" + "text to remove" (legacy)
-      const currentEntries = await this.listDay(keyOrDate, { controller: identityKey });
-      
-      entryToRemove = currentEntries.find(entry => entry.text === entryText);
-      entryKey = entryToRemove ? `entry/${entryToRemove.key}` : '';
-    } else {
-      return false; // Invalid parameters
-    }
+    const entry = myEntries.find(e => e.key === logKey);
+    if (!entry) return false;
 
-    if (!entryToRemove) {
-      return false; // Entry not found or not owned by user
-    }
-
-    // Remove the individual UTXO
-    await this.kv.remove(entryKey);
+    await this.kv.remove(`entry/${entry.key}`);
     return true;
   }
 
   /**
-   * Remove an entire day's logs (all your logs for a specific date)
-   * Only removes logs created by you (your controller)
-   * 
-   * @param date - Date in YYYY-MM-DD format
-   * @returns Promise resolving to true if removed, false if no logs found
+   * Remove an entire day's logs (all your logs for a specific UTC date).
+   *
+   * @param date - Date in YYYY-MM-DD (UTC) format
+   * @returns true if any were removed
    */
   async removeDay(date: string): Promise<boolean> {
     const identityKey = await this.ensureIdentityKey();
-    
-    // Get all current entries for this user on this date
-    const currentEntries = await this.listDay(date, { controller: identityKey });
-    
-    if (currentEntries.length === 0) {
-      return false; // No entries for this date
+
+    // Page through your entries for the day
+    let skip = 0;
+    const pageSize = 200;
+    let removedAny = false;
+
+    while (true) {
+      const page = await this.listDay(date, {
+        controller: identityKey,
+        limit: pageSize,
+        skip,
+        sortOrder: 'asc'
+      });
+
+      if (page.length === 0) break;
+
+      for (const entry of page) {
+        await this.kv.remove(`entry/${entry.key}`);
+        removedAny = true;
+      }
+
+      if (page.length < pageSize) break;
+      skip += page.length;
     }
 
-    // Remove each individual UTXO
-    for (const entry of currentEntries) {
-      const entryKey = `entry/${entry.key}`;
-      await this.kv.remove(entryKey);
-    }
-
-    return true;
+    return removedAny;
   }
 
   /**
-   * Update a specific log entry by spending its UTXO and creating a new one
-   * Only the controller (creator) can update their own logs
-   * The old log becomes part of the spend chain history
-   * 
-   * @param date - Date in YYYY-MM-DD format
-   * @param entryText - Text of the entry to update (for identification)
+   * Update a specific log entry by spending its UTXO and creating a new one.
+   * Only the controller (creator) can update their own logs.
+   * The old log becomes part of the spend chain history.
+   *
+   * @param logKey - Full log key (e.g., "2025-10-07/143022-456abcd")
    * @param newText - New text for the log entry
    * @param options - Optional configuration for the updated entry
-   * @returns Promise resolving to the updated log entry, or undefined if not found
+   * @returns The updated log entry, or undefined if not found/owned
    */
-  async updateEntry(
-    date: string, 
-    entryText: string, 
-    newText: string, 
+  async updateEntryByKey(
+    logKey: string,
+    newText: string,
     options: CreateLogOptions = {}
   ): Promise<LogEntry | undefined> {
     const identityKey = await this.ensureIdentityKey();
-    
-    // Get all current entries for this user on this date
-    const currentEntries = await this.listDay(date, { controller: identityKey });
-    
-    if (currentEntries.length === 0) {
-      return undefined; // No entries for this date
-    }
+    const datePart = logKey.split('/')[0];
 
-    // Find the entry to update
-    const entryToUpdate = currentEntries.find(entry => entry.text === entryText);
-    if (!entryToUpdate) {
-      return undefined; // Entry not found
-    }
+    const myEntries = await this.listDay(datePart, { controller: identityKey, limit: 1000 });
+    const current = myEntries.find(e => e.key === logKey);
+    if (!current) return undefined;
 
-    // Create updated entry with same key (will spend the old UTXO)
-    const updatedEntry: LogEntry = {
-      key: entryToUpdate.key,
-      at: new Date().toISOString(), // New timestamp for the update
+    const updated: LogEntry = {
+      key: current.key,                 // spend same UTXO key lineage
+      at: new Date().toISOString(),     // UTC timestamp for the update
       text: newText,
-      tags: options.tags ?? entryToUpdate.tags ?? [],
-      assets: options.assets ?? entryToUpdate.assets ?? []
+      tags: options.tags ?? current.tags ?? [],
+      assets: options.assets ?? current.assets ?? []
     };
 
-    // Store the updated entry (this spends the old UTXO)
-    await this.putEntry(updatedEntry);
-    
-    return updatedEntry;
+    await this.putEntry(updated); // set() spends prior value
+    return updated;
   }
 
   /**
-   * Get the full history of a specific log entry
-   * Returns the current version plus all historical versions from the spend chain
-   * 
-   * @param logKey - The full log key (e.g., "2025-10-07/143022-456")
-   * @returns Promise resolving to array of log entries (current + history)
+   * Get the full history of a specific log entry (current + historical versions).
+   * Sorted by `at` descending; falls back to key order if needed.
+   *
+   * @param logKey - Full log key (e.g., "2025-10-07/143022-456abcd")
    */
   async getLogHistory(logKey: string): Promise<LogEntry[]> {
     const entryKey = `entry/${logKey}`;
@@ -311,74 +280,44 @@ export class GlossClient {
 
     const history: LogEntry[] = [];
 
-    if (Array.isArray(result)) {
-      // Multiple results - process the first one
-      const firstResult = result[0];
-      if (firstResult?.value) {
+    const ingest = (rec: any) => {
+      if (rec?.value) {
         try {
-          const currentEntry = JSON.parse(firstResult.value) as LogEntry;
-          if (firstResult.controller) {
-            currentEntry.controller = firstResult.controller;
-          }
-          history.push(currentEntry);
-        } catch (e) {
-          console.warn(`Failed to parse current log entry: ${firstResult.key}`, e);
-        }
+          const cur = JSON.parse(rec.value) as LogEntry;
+          if (rec.controller) cur.controller = rec.controller;
+          history.push(cur);
+        } catch { /* ignore */ }
       }
-
-      // Add historical versions
-      if (firstResult?.history && Array.isArray(firstResult.history)) {
-        for (const historicalValue of firstResult.history) {
+      if (Array.isArray(rec?.history)) {
+        for (const hv of rec.history) {
           try {
-            const historicalEntry = JSON.parse(historicalValue) as LogEntry;
-            if (firstResult.controller) {
-              historicalEntry.controller = firstResult.controller;
-            }
-            history.push(historicalEntry);
-          } catch (e) {
-            console.warn(`Failed to parse historical log entry for ${firstResult.key}`, e);
-          }
+            const h = JSON.parse(hv) as LogEntry;
+            if (rec.controller) h.controller = rec.controller;
+            history.push(h);
+          } catch { /* ignore */ }
         }
       }
-    } else if (result?.value) {
-      // Single result
-      try {
-        const currentEntry = JSON.parse(result.value) as LogEntry;
-        if (result.controller) {
-          currentEntry.controller = result.controller;
-        }
-        history.push(currentEntry);
-      } catch (e) {
-        console.warn(`Failed to parse current log entry: ${result.key}`, e);
-      }
+    };
 
-      // Add historical versions
-      if (result.history && Array.isArray(result.history)) {
-        for (const historicalValue of result.history) {
-          try {
-            const historicalEntry = JSON.parse(historicalValue) as LogEntry;
-            if (result.controller) {
-              historicalEntry.controller = result.controller;
-            }
-            history.push(historicalEntry);
-          } catch (e) {
-            console.warn(`Failed to parse historical log entry for ${result.key}`, e);
-          }
-        }
-      }
+    if (Array.isArray(result)) {
+      if (result[0]) ingest(result[0]);
+    } else if (result) {
+      ingest(result);
     }
 
-    // Sort by timestamp (newest first)
-    return history.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+    // Sort newest first by `at` (ISO). Fallback to key.
+    history.sort((a, b) => {
+      const atA = a.at ?? '';
+      const atB = b.at ?? '';
+      if (atA && atB) return atA > atB ? -1 : atA < atB ? 1 : 0;
+      return a.key > b.key ? -1 : a.key < b.key ? 1 : 0;
+    });
+
+    return history;
   }
 
   /**
    * Upload an asset to UHRP storage and get the URL
-   * 
-   * @param data - The file data as Uint8Array
-   * @param mimeType - MIME type of the file
-   * @param options - Upload configuration
-   * @returns Promise resolving to upload result with UHRP URL
    */
   async uploadAsset(
     data: Uint8Array,
@@ -392,7 +331,7 @@ export class GlossClient {
 
     const res: any = await uploader.publishFile({
       file: { data, type: mimeType },
-      retentionPeriod: options.retentionMinutes ?? (60 * 24 * 30) // 30 days default
+      retentionPeriod: options.retentionMinutes ?? 60 * 24 * 30 // minutes; 30 days default
     } as any);
 
     return {
@@ -403,12 +342,6 @@ export class GlossClient {
 
   /**
    * Create a log entry with an uploaded asset
-   * 
-   * @param text - The log message
-   * @param data - The file data as Uint8Array
-   * @param mimeType - MIME type of the file
-   * @param options - Optional configuration
-   * @returns Promise resolving to the created log entry with asset URL
    */
   async logWithAsset(
     text: string,
@@ -425,28 +358,25 @@ export class GlossClient {
   }
 
   /**
-   * Generate a unique log key (internal method)
+   * Generate a unique UTC log key (internal)
+   * Format: YYYY-MM-DD/HHmmss-SSS<rand>
    */
   private async nextIdForDay(yyyyMmDd: string): Promise<string> {
-    // Create unique timestamp-based key for individual UTXO
     const now = new Date();
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
-    const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
-    
-    // Format: YYYY-MM-DD/HHmmss-mmm
-    return `${yyyyMmDd}/${hours}${minutes}${seconds}-${milliseconds}`;
+    const hours = String(now.getUTCHours()).padStart(2, '0');
+    const minutes = String(now.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(now.getUTCSeconds()).padStart(2, '0');
+    const milliseconds = String(now.getUTCMilliseconds()).padStart(3, '0');
+    const rand = Math.random().toString(36).slice(2, 6); // reduce collision risk
+    return `${yyyyMmDd}/${hours}${minutes}${seconds}-${milliseconds}${rand}`;
   }
 
   /**
-   * Store a log entry (internal method)
-   * Each log entry creates its own transaction in the spend chain
+   * Store a log entry (internal)
+   * Each call spends/replaces the previous UTXO for this key lineage.
    */
   private async putEntry(entry: LogEntry): Promise<void> {
-    const dayKey = `entry/${entry.key}`;
-    
-    // Store just this log entry - it will spend the previous transaction automatically
-    await this.kv.set(dayKey, JSON.stringify(entry));
+    const entryKey = `entry/${entry.key}`;
+    await this.kv.set(entryKey, JSON.stringify(entry));
   }
 }

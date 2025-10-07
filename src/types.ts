@@ -8,8 +8,6 @@ export interface GlossConfig {
   wallet?: WalletInterface;
   /** BSV network to use */
   networkPreset?: 'mainnet' | 'testnet';
-  /** Custom wallet host (if using WalletClient) */
-  walletHost?: string;
   /** Wallet mode (if using WalletClient) */
   walletMode?: 'auto' | 'json-api';
 }
@@ -61,7 +59,9 @@ export interface QueryOptions {
   /** Filter by tags */
   tags?: string[];
   /** Maximum number of entries to return */
-  limit?: number;
+  limit?: number
+  skip?: number
+  sortOrder?: 'asc' | 'desc'
 }
 
 /**
