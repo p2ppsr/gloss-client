@@ -5,7 +5,8 @@ import {
   CreateLogOptions,
   QueryOptions,
   UploadResult,
-  UploadOptions
+  UploadOptions,
+  DayChain
 } from './types.js';
 
 // Protocol identifier for gloss logs
@@ -74,18 +75,24 @@ export class GlossClient {
    */
   async log(text: string, options: CreateLogOptions = {}): Promise<LogEntry> {
     const now = new Date();
-    const day = now.toISOString().slice(0, 10); // YYYY-MM-DD in UTC
-    const key = this.nextIdForDay(day);         // entry/YYYY-MM-DD/HHmmss-SSS<rand>
+    const day = now.toISOString().slice(0, 10);
+    const identityKey = await this.ensureIdentityKey();
+    const key = this.nextIdForDay(day, now);
 
     const entry: LogEntry = {
       key,
-      at: now.toISOString(), // UTC ISO timestamp
+      at: now.toISOString(),
       text,
       tags: options.tags ?? [],
-      assets: options.assets ?? []
+      assets: options.assets ?? [],
+      controller: identityKey
     };
 
-    await this.putEntry(entry);
+    const chain = await this.loadDayChain(day, identityKey);
+    chain.logs.push(entry);
+    this.sortLogs(chain.logs);
+
+    await this.saveDayChain(chain);
     return entry;
   }
 
@@ -110,66 +117,49 @@ export class GlossClient {
    * @returns entries sorted by key (chronological in UTC)
    */
   async listDay(date: string, options: QueryOptions = {}): Promise<LogEntry[]> {
-    const keyPrefix = `entry/${date}/`;
-
-    // Store-page scan controls (with guardrails)
-    const pageSize = Math.max(1, Math.min(options.pageSize ?? 500, 2000));
-    const maxPages = Math.max(1, options.maxPages ?? 20);
-    const want = options.limit && options.limit > 0 ? options.limit : undefined;
-
-    let skip = Math.max(0, options.skip ?? 0);
-    const out: LogEntry[] = [];
-
-    const consider = (rec: any) => {
-      if (!rec?.value || typeof rec.value !== 'string') return;
-      if (!rec.key?.startsWith(keyPrefix)) return;
-      try {
-        const e = JSON.parse(rec.value) as LogEntry;
-        if (rec.controller) e.controller = rec.controller;
-        out.push(e);
-      } catch {
-        // ignore malformed entries
-      }
-    };
-
-    for (let page = 0; page < maxPages; page++) {
-      const res = await this.kv.get({
-        protocolID: GLOSS_PROTOCOL_ID,
-        limit: pageSize,
-        skip,
-        sortOrder: options.sortOrder ?? 'asc'
-      });
-
-      const rows = Array.isArray(res) ? res : res ? [res] : [];
-      if (rows.length === 0) break;
-
-      for (const r of rows) consider(r);
-
-      if (want && out.length >= want) break;
-      skip += rows.length;
-    }
-
-    // Client-side filters
-    let filtered = out;
+    const dayKey = this.dayKey(date);
+    const query: any = { key: dayKey };
 
     if (options.controller) {
-      filtered = filtered.filter(e => e.controller === options.controller);
-    }
-    if (options.tags?.length) {
-      filtered = filtered.filter(e => e.tags?.some(t => options.tags!.includes(t)));
+      query.controller = options.controller;
     }
 
-    // Sort by key (lexicographic aligns with UTC timestamp segment)
-    if ((options.sortOrder ?? 'asc') === 'asc') {
-      filtered.sort((a, b) => a.key.localeCompare(b.key));
-    } else {
-      filtered.sort((a, b) => b.key.localeCompare(a.key));
+    if (options.tags && options.tags.length > 0) {
+      query.tags = options.tags;
+      if (options.tagQueryMode) {
+        query.tagQueryMode = options.tagQueryMode;
+      }
     }
 
-    // Apply final limit after filtering
-    if (want) filtered = filtered.slice(0, want);
+    const result = await this.kv.get(query);
+    const rows = Array.isArray(result) ? result : result ? [result] : [];
 
-    return filtered;
+    const tagSet = options.tags && options.tags.length > 0 ? new Set(options.tags) : undefined;
+    const logs: LogEntry[] = [];
+
+    for (const record of rows) {
+      if (typeof record?.value !== 'string') continue;
+
+      const chain = this.parseDayChain(record.value, record.controller);
+      if (!chain) continue;
+
+      for (const log of chain.logs) {
+        if (options.controller && log.controller !== options.controller) continue;
+        if (tagSet && !this.matchesTagFilter(log.tags ?? [], tagSet, options.tagQueryMode)) continue;
+        logs.push(this.cloneLog(log));
+      }
+    }
+
+    const sortOrder = options.sortOrder ?? 'asc';
+    logs.sort((a, b) => a.key.localeCompare(b.key));
+    if (sortOrder === 'desc') {
+      logs.reverse();
+    }
+
+    const skip = Math.max(0, options.skip ?? 0);
+    const limited = options.limit && options.limit > 0 ? logs.slice(skip, skip + options.limit) : logs.slice(skip);
+
+    return limited;
   }
 
   /**
@@ -190,20 +180,23 @@ export class GlossClient {
   async removeEntry(logKey: string): Promise<boolean> {
     const identityKey = await this.ensureIdentityKey();
     const datePart = logKey.split('/')[0];
+    const chain = await this.loadDayChain(datePart, identityKey);
 
-    // Scan enough to likely include the target (tune maxPages/pageSize if your day is heavy)
-    const myEntries = await this.listDay(datePart, {
-      controller: identityKey,
-      limit: 10000,
-      pageSize: 500,
-      maxPages: 40,
-      sortOrder: 'asc'
-    });
+    const index = chain.logs.findIndex(log => log.key === logKey);
+    if (index === -1) return false;
 
-    const entry = myEntries.find(e => e.key === logKey);
-    if (!entry) return false;
+    chain.logs.splice(index, 1);
 
-    await this.kv.remove(`entry/${entry.key}`);
+    if (chain.logs.length === 0) {
+      try {
+        await this.kv.remove(this.dayKey(datePart));
+      } catch {
+        return false;
+      }
+    } else {
+      await this.saveDayChain(chain);
+    }
+
     return true;
   }
 
@@ -214,34 +207,12 @@ export class GlossClient {
    * @returns true if any were removed
    */
   async removeDay(date: string): Promise<boolean> {
-    const identityKey = await this.ensureIdentityKey();
-    let removedAny = false;
-
-    // Iterate pages until we stop seeing results
-    let skip = 0;
-    const pageSize = 500;
-
-    while (true) {
-      const page = await this.listDay(date, {
-        controller: identityKey,
-        limit: pageSize,  // desired results after filtering
-        skip,
-        pageSize,         // store page size
-        maxPages: 1,      // scan exactly one store page per loop
-        sortOrder: 'asc'
-      });
-
-      if (page.length === 0) break;
-
-      for (const entry of page) {
-        await this.kv.remove(`entry/${entry.key}`);
-        removedAny = true;
-      }
-
-      skip += pageSize;
+    try {
+      await this.kv.remove(this.dayKey(date));
+      return true;
+    } catch {
+      return false;
     }
-
-    return removedAny;
   }
 
   /**
@@ -261,20 +232,25 @@ export class GlossClient {
   ): Promise<LogEntry | undefined> {
     const identityKey = await this.ensureIdentityKey();
     const datePart = logKey.split('/')[0];
+    const chain = await this.loadDayChain(datePart, identityKey);
 
-    const myEntries = await this.listDay(datePart, { controller: identityKey, limit: 1000 });
-    const current = myEntries.find(e => e.key === logKey);
-    if (!current) return undefined;
+    const index = chain.logs.findIndex(log => log.key === logKey);
+    if (index === -1) return undefined;
 
+    const current = chain.logs[index];
     const updated: LogEntry = {
-      key: current.key,                 // spend same UTXO key lineage
-      at: new Date().toISOString(),     // UTC timestamp for the update
+      key: current.key,
+      at: new Date().toISOString(),
       text: newText,
       tags: options.tags ?? current.tags ?? [],
-      assets: options.assets ?? current.assets ?? []
+      assets: options.assets ?? current.assets ?? [],
+      controller: identityKey
     };
 
-    await this.putEntry(updated); // set() spends prior value
+    chain.logs[index] = updated;
+    this.sortLogs(chain.logs);
+
+    await this.saveDayChain(chain);
     return updated;
   }
 
@@ -285,37 +261,36 @@ export class GlossClient {
    * @param logKey - Full log key (e.g., "2025-10-07/143022-456abcd")
    */
   async getLogHistory(logKey: string): Promise<LogEntry[]> {
-    const entryKey = `entry/${logKey}`;
-    const result = await this.kv.get({ key: entryKey }, { history: true });
+    const day = logKey.split('/')[0];
+    const dayKey = this.dayKey(day);
+    const result = await this.kv.get({ key: dayKey }, { history: true });
 
+    const rows = Array.isArray(result) ? result : result ? [result] : [];
     const history: LogEntry[] = [];
 
-    const ingest = (rec: any) => {
-      if (rec?.value) {
-        try {
-          const cur = JSON.parse(rec.value) as LogEntry;
-          if (rec.controller) cur.controller = rec.controller;
-          history.push(cur);
-        } catch { /* ignore */ }
-      }
-      if (Array.isArray(rec?.history)) {
-        for (const hv of rec.history) {
-          try {
-            const h = JSON.parse(hv) as LogEntry;
-            if (rec.controller) h.controller = rec.controller;
-            history.push(h);
-          } catch { /* ignore */ }
-        }
+    const ingest = (value: string | undefined, controller?: string) => {
+      if (!value) return;
+      const chain = this.parseDayChain(value, controller);
+      if (!chain) return;
+      for (const log of chain.logs) {
+        if (log.key !== logKey) continue;
+        history.push(this.cloneLog(log));
       }
     };
 
-    if (Array.isArray(result)) {
-      if (result[0]) ingest(result[0]);
-    } else if (result) {
-      ingest(result);
+    for (const record of rows) {
+      if (typeof record?.value === 'string') {
+        ingest(record.value, record.controller);
+      }
+      if (Array.isArray(record?.history)) {
+        for (const past of record.history) {
+          if (typeof past === 'string') {
+            ingest(past, record.controller);
+          }
+        }
+      }
     }
 
-    // Sort newest first by `at` (ISO). Fallback to key (descending).
     history.sort((a, b) => {
       const atA = a.at ?? '';
       const atB = b.at ?? '';
@@ -373,13 +348,13 @@ export class GlossClient {
    * Generate a unique UTC log key (internal).
    * Format: YYYY-MM-DD/HHmmss-SSS<rand>
    */
-  private nextIdForDay(yyyyMmDd: string): string {
-    const now = new Date();
-    const hours = String(now.getUTCHours()).padStart(2, '0');
-    const minutes = String(now.getUTCMinutes()).padStart(2, '0');
-    const seconds = String(now.getUTCSeconds()).padStart(2, '0');
-    const milliseconds = String(now.getUTCMilliseconds()).padStart(3, '0');
-    const rand = Math.random().toString(36).slice(2, 6); // reduce collision risk
+  private nextIdForDay(yyyyMmDd: string, reference?: Date): string {
+    const base = reference ?? new Date();
+    const hours = String(base.getUTCHours()).padStart(2, '0');
+    const minutes = String(base.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(base.getUTCSeconds()).padStart(2, '0');
+    const milliseconds = String(base.getUTCMilliseconds()).padStart(3, '0');
+    const rand = Math.random().toString(36).slice(2, 6);
     return `${yyyyMmDd}/${hours}${minutes}${seconds}-${milliseconds}${rand}`;
   }
 
@@ -387,8 +362,140 @@ export class GlossClient {
    * Store a log entry (internal).
    * Each call spends/replaces the previous UTXO for this key lineage.
    */
-  private async putEntry(entry: LogEntry): Promise<void> {
-    const entryKey = `entry/${entry.key}`;
-    await this.kv.set(entryKey, JSON.stringify(entry));
+  private dayKey(day: string): string {
+    return `entry/${day}`;
+  }
+
+  private async loadDayChain(day: string, controller: string): Promise<DayChain> {
+    const key = this.dayKey(day);
+    const existing = await this.kv.get({ key, controller });
+    const entry = Array.isArray(existing) ? existing[0] : existing;
+
+    if (entry && typeof entry.value === 'string') {
+      const chain = this.parseDayChain(entry.value, controller);
+      if (chain) {
+        return chain;
+      }
+    }
+
+    return { key: day, logs: [] };
+  }
+
+  private async saveDayChain(chain: DayChain): Promise<void> {
+    const serialized = JSON.stringify(chain);
+    const tags = this.collectTags(chain.logs);
+    if (tags.length > 0) {
+      await this.kv.set(this.dayKey(chain.key), serialized, { tags });
+    } else {
+      await this.kv.set(this.dayKey(chain.key), serialized);
+    }
+  }
+
+  private parseDayChain(value: string, controller?: string): DayChain | null {
+    try {
+      const parsed = JSON.parse(value);
+
+      if (parsed == null || typeof parsed !== 'object') {
+        return null;
+      }
+
+      if (Array.isArray(parsed.logs)) {
+        const logs: LogEntry[] = [];
+        for (const raw of parsed.logs) {
+          const normalized = this.normalizeLog(raw, controller);
+          if (normalized) logs.push(normalized);
+        }
+        if (logs.length === 0) return null;
+        const key = typeof parsed.key === 'string' && parsed.key.length > 0
+          ? parsed.key
+          : logs[0].key.split('/')[0];
+        return { key, logs };
+      }
+
+      const single = this.normalizeLog(parsed, controller);
+      if (!single) return null;
+      const key = single.key.split('/')[0];
+      return { key, logs: [single] };
+    } catch {
+      return null;
+    }
+  }
+
+  private collectTags(logs: LogEntry[]): string[] {
+    const set = new Set<string>();
+    for (const log of logs) {
+      if (!Array.isArray(log.tags)) continue;
+      for (const tag of log.tags) {
+        if (typeof tag === 'string' && tag.trim() !== '') {
+          set.add(tag);
+        }
+      }
+    }
+    return Array.from(set);
+  }
+
+  private sortLogs(logs: LogEntry[]): void {
+    logs.sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  private matchesTagFilter(tags: string[], filter: Set<string>, mode: QueryOptions['tagQueryMode']): boolean {
+    if (tags.length === 0) {
+      return false;
+    }
+
+    if (mode === 'all') {
+      for (const wanted of filter) {
+        if (!tags.includes(wanted)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    for (const tag of tags) {
+      if (filter.has(tag)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private cloneLog(log: LogEntry): LogEntry {
+    return {
+      key: log.key,
+      at: log.at,
+      text: log.text,
+      tags: log.tags ? [...log.tags] : undefined,
+      assets: log.assets ? [...log.assets] : undefined,
+      controller: log.controller
+    };
+  }
+
+  private normalizeLog(raw: any, controller?: string): LogEntry | null {
+    if (raw == null || typeof raw !== 'object') {
+      return null;
+    }
+
+    const key = typeof raw.key === 'string' ? raw.key : this.nextIdForDay(new Date().toISOString().slice(0, 10));
+    const at = typeof raw.at === 'string' ? raw.at : new Date().toISOString();
+    const text = typeof raw.text === 'string' ? raw.text : '';
+    const tags = Array.isArray(raw.tags) ? raw.tags.filter((tag: unknown) => typeof tag === 'string') : undefined;
+    const assets = Array.isArray(raw.assets) ? raw.assets.filter((asset: unknown) => typeof asset === 'string') : undefined;
+    const ctrl = typeof raw.controller === 'string' ? raw.controller : controller;
+
+    if (!key || !text) {
+      return null;
+    }
+
+    const normalizedKey = key.includes('/') ? key : `${at.slice(0, 10)}/${key}`;
+
+    return {
+      key: normalizedKey,
+      at,
+      text,
+      tags,
+      assets,
+      controller: ctrl
+    };
   }
 }

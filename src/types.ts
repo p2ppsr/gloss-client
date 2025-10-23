@@ -56,6 +56,7 @@ export interface CreateLogOptions {
 export interface QueryOptions {
   controller?: string;
   tags?: string[];
+  tagQueryMode?: 'all' | 'any';
   // desired number of results returned to the caller, after filtering
   limit?: number;
   // initial offset into the global protocol stream

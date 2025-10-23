@@ -38,14 +38,11 @@
     "type": "git",
     "url": "https://github.com/p2ppsr/gloss-logs.git"
   },
-  "peerDependencies": {
-    "@bsv/sdk": "^1.8.0"
-  },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "typescript": "^5.5.4"
   },
   "dependencies": {
-    "@bsv/sdk": "^1.8.2"
+    "@bsv/sdk": "^1.8.8"
   }
 }
