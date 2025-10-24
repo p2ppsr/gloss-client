@@ -131,7 +131,12 @@ export class GlossClient {
       }
     }
 
-    const result = await this.kv.get(query);
+    const getOptions: any = {};
+    if (options.includeTxid) {
+      getOptions.includeToken = true;
+    }
+
+    const result = await this.kv.get(query, getOptions);
     const rows = Array.isArray(result) ? result : result ? [result] : [];
 
     const tagSet = options.tags && options.tags.length > 0 ? new Set(options.tags) : undefined;
@@ -146,7 +151,11 @@ export class GlossClient {
       for (const log of chain.logs) {
         if (options.controller && log.controller !== options.controller) continue;
         if (tagSet && !this.matchesTagFilter(log.tags ?? [], tagSet, options.tagQueryMode)) continue;
-        logs.push(this.cloneLog(log));
+        const clonedLog = this.cloneLog(log);
+        if (options.includeTxid && record.token?.txid) {
+          clonedLog.txid = record.token.txid;
+        }
+        logs.push(clonedLog);
       }
     }
 
@@ -259,33 +268,44 @@ export class GlossClient {
    * Sorted by `at` descending; falls back to key order if needed.
    *
    * @param logKey - Full log key (e.g., "2025-10-07/143022-456abcd")
+   * @param options - Optional query configuration (only includeTxid is used)
    */
-  async getLogHistory(logKey: string): Promise<LogEntry[]> {
+  async getLogHistory(logKey: string, options: Pick<QueryOptions, 'includeTxid'> = {}): Promise<LogEntry[]> {
     const day = logKey.split('/')[0];
     const dayKey = this.dayKey(day);
-    const result = await this.kv.get({ key: dayKey }, { history: true });
+    
+    const getOptions: any = { history: true };
+    if (options.includeTxid) {
+      getOptions.includeToken = true;
+    }
+    
+    const result = await this.kv.get({ key: dayKey }, getOptions);
 
     const rows = Array.isArray(result) ? result : result ? [result] : [];
     const history: LogEntry[] = [];
 
-    const ingest = (value: string | undefined, controller?: string) => {
+    const ingest = (value: string | undefined, controller?: string, txid?: string) => {
       if (!value) return;
       const chain = this.parseDayChain(value, controller);
       if (!chain) return;
       for (const log of chain.logs) {
         if (log.key !== logKey) continue;
-        history.push(this.cloneLog(log));
+        const clonedLog = this.cloneLog(log);
+        if (options.includeTxid && txid) {
+          clonedLog.txid = txid;
+        }
+        history.push(clonedLog);
       }
     };
 
     for (const record of rows) {
       if (typeof record?.value === 'string') {
-        ingest(record.value, record.controller);
+        ingest(record.value, record.controller, record.token?.txid);
       }
       if (Array.isArray(record?.history)) {
         for (const past of record.history) {
           if (typeof past === 'string') {
-            ingest(past, record.controller);
+            ingest(past, record.controller, record.token?.txid);
           }
         }
       }
@@ -467,7 +487,8 @@ export class GlossClient {
       text: log.text,
       tags: log.tags ? [...log.tags] : undefined,
       assets: log.assets ? [...log.assets] : undefined,
-      controller: log.controller
+      controller: log.controller,
+      txid: log.txid
     };
   }
 

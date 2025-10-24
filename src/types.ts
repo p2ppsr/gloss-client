@@ -28,6 +28,8 @@ export interface LogEntry {
   assets?: string[];
   /** Identity key of who created this log (for filtering) */
   controller?: string;
+  /** Optional transaction ID of the record (only included if requested) */
+  txid?: string;
 }
 
 /**
@@ -67,6 +69,8 @@ export interface QueryOptions {
   pageSize?: number;
   // hard cap on store pages to scan
   maxPages?: number;
+  // include transaction IDs in the returned log entries
+  includeTxid?: boolean;
 }
 
 /**
