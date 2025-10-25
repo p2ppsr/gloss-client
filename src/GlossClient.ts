@@ -22,10 +22,15 @@ const GLOSS_PROTOCOL_ID: WalletProtocol = [1, 'gloss logs'];
  * - History traversal reconstructs all logs for a day by following the spend chain
  * - This eliminates data duplication and keeps tokens minimal
  *
- * Key format:
- *   entry/{YYYY-MM-DD}  (day-level key, each log spends previous token)
+ * Time Handling:
+ * - Uses LOCAL time for day keys and log timestamps
+ * - This ensures logs appear on the correct day in the user's timezone
+ * - Example: Evening log on Oct 24 PST stays on Oct 24, not next day UTC
  *
- * Log Entry format (UTC):
+ * Key format:
+ *   entry/{YYYY-MM-DD}  (day-level key in local timezone)
+ *
+ * Log Entry format (local time):
  *   {YYYY-MM-DD}/{HHmmss-SSS<rand>}
  *
  * Discovery:
@@ -71,7 +76,7 @@ export class GlossClient {
   }
 
   /**
-   * Create a new log entry (UTC date & time).
+   * Create a new log entry (local date & time).
    * Each log is stored as a single entry in its own token.
    * History traversal reconstructs the full day.
    *
@@ -81,7 +86,7 @@ export class GlossClient {
    */
   async log(text: string, options: CreateLogOptions = {}): Promise<LogEntry> {
     const now = new Date();
-    const day = now.toISOString().slice(0, 10);
+    const day = this.getLocalDate(now);
     const identityKey = await this.ensureIdentityKey();
     const key = this.nextIdForDay(day, now);
 
@@ -103,22 +108,22 @@ export class GlossClient {
   }
 
   /**
-   * Get all log entries for a specific UTC date.
+   * Get all log entries for a specific date.
    * Alias for listDay(date).
    *
-   * @param date - Date in YYYY-MM-DD (UTC) format
+   * @param date - Date in YYYY-MM-DD format
    */
   async get(date: string): Promise<LogEntry[]> {
     return this.listDay(date);
   }
 
   /**
-   * List all log entries for a specific UTC date from all users.
+   * List all log entries for a specific date from all users.
    * Uses history traversal to collect individual log entries.
    *
-   * @param date - YYYY-MM-DD (UTC)
+   * @param date - YYYY-MM-DD format
    * @param options - Optional filters and pagination (see QueryOptions)
-   * @returns entries sorted by key (chronological in UTC)
+   * @returns entries sorted by key (chronological)
    */
   async listDay(date: string, options: QueryOptions = {}): Promise<LogEntry[]> {
     const dayKey = this.dayKey(date);
@@ -201,10 +206,10 @@ export class GlossClient {
   }
 
   /**
-   * List today's log entries from all users (UTC "today").
+   * List today's log entries from all users (local "today").
    */
   async listToday(options: QueryOptions = {}): Promise<LogEntry[]> {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = this.getLocalDate(new Date());
     return this.listDay(today, options);
   }
 
@@ -230,9 +235,9 @@ export class GlossClient {
   }
 
   /**
-   * Remove an entire day's logs (all your logs for a specific UTC date).
+   * Remove an entire day's logs (all your logs for a specific date).
    *
-   * @param date - Date in YYYY-MM-DD (UTC) format
+   * @param date - Date in YYYY-MM-DD format
    * @returns true if any were removed
    */
   async removeDay(date: string): Promise<boolean> {
@@ -388,15 +393,15 @@ export class GlossClient {
   }
 
   /**
-   * Generate a unique UTC log key (internal).
+   * Generate a unique local time log key (internal).
    * Format: YYYY-MM-DD/HHmmss-SSS<rand>
    */
   private nextIdForDay(yyyyMmDd: string, reference?: Date): string {
     const base = reference ?? new Date();
-    const hours = String(base.getUTCHours()).padStart(2, '0');
-    const minutes = String(base.getUTCMinutes()).padStart(2, '0');
-    const seconds = String(base.getUTCSeconds()).padStart(2, '0');
-    const milliseconds = String(base.getUTCMilliseconds()).padStart(3, '0');
+    const hours = String(base.getHours()).padStart(2, '0');
+    const minutes = String(base.getMinutes()).padStart(2, '0');
+    const seconds = String(base.getSeconds()).padStart(2, '0');
+    const milliseconds = String(base.getMilliseconds()).padStart(3, '0');
     const rand = Math.random().toString(36).slice(2, 6);
     return `${yyyyMmDd}/${hours}${minutes}${seconds}-${milliseconds}${rand}`;
   }
@@ -407,6 +412,17 @@ export class GlossClient {
    */
   private dayKey(day: string): string {
     return `entry/${day}`;
+  }
+
+  /**
+   * Get local date string in YYYY-MM-DD format.
+   * Uses the user's local timezone.
+   */
+  private getLocalDate(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
 
   private parseLogEntry(value: string, controller?: string): LogEntry | null {
@@ -471,7 +487,7 @@ export class GlossClient {
       return null;
     }
 
-    const key = typeof raw.key === 'string' ? raw.key : this.nextIdForDay(new Date().toISOString().slice(0, 10));
+    const key = typeof raw.key === 'string' ? raw.key : this.nextIdForDay(this.getLocalDate(new Date()));
     const at = typeof raw.at === 'string' ? raw.at : new Date().toISOString();
     const text = typeof raw.text === 'string' ? raw.text : '';
     const tags = Array.isArray(raw.tags) ? raw.tags.filter((tag: unknown) => typeof tag === 'string') : undefined;
