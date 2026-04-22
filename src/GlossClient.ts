@@ -103,7 +103,7 @@ export class GlossClient {
     const serialized = JSON.stringify(entry);
     const tags = [...(options.tags ?? []), day]; // Include day as tag for filtering
     await this.kv.set(this.dayKey(day), serialized, { tags });
-    
+
     return entry;
   }
 
@@ -155,14 +155,14 @@ export class GlossClient {
     // Process current and historical entries
     for (const record of rows) {
       const txid = record.token?.txid;
-      
+
       // Process current entry
       if (typeof record?.value === 'string') {
         const log = this.parseLogEntry(record.value, record.controller);
         if (log && !seenKeys.has(log.key)) {
           if (options.controller && log.controller !== options.controller) continue;
           if (tagSet && !this.matchesTagFilter(log.tags ?? [], tagSet, options.tagQueryMode)) continue;
-          
+
           const clonedLog = this.cloneLog(log);
           if (options.includeTxid && txid) {
             clonedLog.txid = txid;
@@ -176,12 +176,12 @@ export class GlossClient {
       if (Array.isArray(record?.history)) {
         for (const pastValue of record.history) {
           if (typeof pastValue !== 'string') continue;
-          
+
           const log = this.parseLogEntry(pastValue, record.controller);
           if (log && !seenKeys.has(log.key)) {
             if (options.controller && log.controller !== options.controller) continue;
             if (tagSet && !this.matchesTagFilter(log.tags ?? [], tagSet, options.tagQueryMode)) continue;
-            
+
             const clonedLog = this.cloneLog(log);
             if (options.includeTxid && txid) {
               clonedLog.txid = txid;
@@ -267,11 +267,11 @@ export class GlossClient {
   ): Promise<LogEntry | undefined> {
     const identityKey = await this.ensureIdentityKey();
     const datePart = logKey.split('/')[0];
-    
+
     // First, verify the log exists and we own it
     const existing = await this.listDay(datePart, { controller: identityKey });
     const current = existing.find(log => log.key === logKey);
-    
+
     if (!current) return undefined;
 
     // Create updated entry with same key
@@ -288,7 +288,7 @@ export class GlossClient {
     const serialized = JSON.stringify(updated);
     const tags = [...(updated.tags ?? []), datePart];
     await this.kv.set(this.dayKey(datePart), serialized, { tags });
-    
+
     return updated;
   }
 
@@ -302,12 +302,12 @@ export class GlossClient {
   async getLogHistory(logKey: string, options: Pick<QueryOptions, 'includeTxid'> = {}): Promise<LogEntry[]> {
     const day = logKey.split('/')[0];
     const dayKey = this.dayKey(day);
-    
+
     const getOptions: any = { history: true };
     if (options.includeTxid) {
       getOptions.includeToken = true;
     }
-    
+
     const result = await this.kv.get({ key: dayKey }, getOptions);
 
     const rows = Array.isArray(result) ? result : result ? [result] : [];
@@ -318,7 +318,7 @@ export class GlossClient {
       const log = this.parseLogEntry(value, controller);
       if (!log) return;
       if (log.key !== logKey) return;
-      
+
       const clonedLog = this.cloneLog(log);
       if (options.includeTxid && txid) {
         clonedLog.txid = txid;
@@ -431,7 +431,7 @@ export class GlossClient {
       if (parsed == null || typeof parsed !== 'object') {
         return null;
       }
-      
+
       // Handle new format (single entry) or old format (day chain) for backward compatibility
       if (Array.isArray(parsed.logs)) {
         // Old day chain format - extract first log
@@ -441,7 +441,7 @@ export class GlossClient {
         }
         return null;
       }
-      
+
       return this.normalizeLog(parsed, controller);
     } catch {
       return null;

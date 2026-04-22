@@ -1,6 +1,6 @@
 {
   "name": "gloss-client",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Global developer logging SDK with individual UTXO architecture for granular log management on BSV blockchain",
   "type": "module",
   "main": "dist/index.js",
@@ -43,6 +43,6 @@
     "typescript": "^5.5.4"
   },
   "dependencies": {
-    "@bsv/sdk": "^1.8.8"
+    "@bsv/sdk": "^2.0.13"
   }
 }
