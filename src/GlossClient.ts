@@ -77,8 +77,8 @@ export class GlossClient {
 
   /**
    * Create a new log entry (local date & time).
-   * Each log is stored as a single entry in its own token.
-   * History traversal reconstructs the full day.
+   * Each log is stored as the next value in the controller's day-level token
+   * lineage. History traversal reconstructs the full day.
    *
    * @param text - The log message
    * @param options - Optional configuration
@@ -99,7 +99,7 @@ export class GlossClient {
       controller: identityKey
     };
 
-    // Store only this single log entry (not the entire day chain)
+    // Store only this single log entry as the next value in the day lineage.
     const serialized = JSON.stringify(entry);
     const tags = [...(options.tags ?? []), day]; // Include day as tag for filtering
     await this.kv.set(this.dayKey(day), serialized, { tags });
@@ -150,44 +150,49 @@ export class GlossClient {
 
     const tagSet = options.tags && options.tags.length > 0 ? new Set(options.tags) : undefined;
     const logs: LogEntry[] = [];
-    const seenKeys = new Set<string>(); // Deduplicate entries
+    const seenEntries = new Set<string>(); // Deduplicate logical entries per controller
 
     // Process current and historical entries
     for (const record of rows) {
-      const txid = record.token?.txid;
+      const currentTxid = record.token?.txid;
 
       // Process current entry
       if (typeof record?.value === 'string') {
         const log = this.parseLogEntry(record.value, record.controller);
-        if (log && !seenKeys.has(log.key)) {
+        const entryIdentity = log ? `${log.controller ?? record.controller ?? ''}\u0000${log.key}` : '';
+        if (log && !seenEntries.has(entryIdentity)) {
           if (options.controller && log.controller !== options.controller) continue;
           if (tagSet && !this.matchesTagFilter(log.tags ?? [], tagSet, options.tagQueryMode)) continue;
 
           const clonedLog = this.cloneLog(log);
-          if (options.includeTxid && txid) {
-            clonedLog.txid = txid;
+          if (options.includeTxid && currentTxid) {
+            clonedLog.txid = currentTxid;
           }
           logs.push(clonedLog);
-          seenKeys.add(log.key);
+          seenEntries.add(entryIdentity);
         }
       }
 
-      // Process historical entries
+      // Process historical entries newest-first so an updated logical entry
+      // wins over its older revisions. Historian returns oldest-first.
       if (Array.isArray(record?.history)) {
-        for (const pastValue of record.history) {
+        for (const pastValue of [...record.history].reverse()) {
           if (typeof pastValue !== 'string') continue;
 
           const log = this.parseLogEntry(pastValue, record.controller);
-          if (log && !seenKeys.has(log.key)) {
+          const entryIdentity = log ? `${log.controller ?? record.controller ?? ''}\u0000${log.key}` : '';
+          if (log && !seenEntries.has(entryIdentity)) {
             if (options.controller && log.controller !== options.controller) continue;
             if (tagSet && !this.matchesTagFilter(log.tags ?? [], tagSet, options.tagQueryMode)) continue;
 
+            // GlobalKVStore history currently contains values without
+            // per-transaction metadata. Do not attach the current lineage
+            // tip's txid to a historical value: that txid belongs only to
+            // record.value and would falsely make every historical entry look
+            // like the same transaction.
             const clonedLog = this.cloneLog(log);
-            if (options.includeTxid && txid) {
-              clonedLog.txid = txid;
-            }
             logs.push(clonedLog);
-            seenKeys.add(log.key);
+            seenEntries.add(entryIdentity);
           }
         }
       }
@@ -312,18 +317,21 @@ export class GlossClient {
 
     const rows = Array.isArray(result) ? result : result ? [result] : [];
     const history: LogEntry[] = [];
+    const seenValues = new Set<string>();
 
     const ingest = (value: string | undefined, controller?: string, txid?: string) => {
       if (!value) return;
       const log = this.parseLogEntry(value, controller);
       if (!log) return;
       if (log.key !== logKey) return;
+      if (seenValues.has(value)) return;
 
       const clonedLog = this.cloneLog(log);
       if (options.includeTxid && txid) {
         clonedLog.txid = txid;
       }
       history.push(clonedLog);
+      seenValues.add(value);
     };
 
     for (const record of rows) {
@@ -333,7 +341,8 @@ export class GlossClient {
       if (Array.isArray(record?.history)) {
         for (const past of record.history) {
           if (typeof past === 'string') {
-            ingest(past, record.controller, record.token?.txid);
+            // Historical values do not carry their own transaction metadata.
+            ingest(past, record.controller);
           }
         }
       }

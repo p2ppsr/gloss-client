@@ -28,7 +28,13 @@ export interface LogEntry {
   assets?: string[];
   /** Identity key of who created this log (for filtering) */
   controller?: string;
-  /** Optional transaction ID of the record (only included if requested) */
+  /**
+   * Transaction ID containing this exact entry.
+   *
+   * Present only when `includeTxid` is requested and GlobalKVStore exposes
+   * transaction metadata for this value. Historical values currently omit it
+   * rather than inheriting the day lineage tip's transaction ID.
+   */
   txid?: string;
 }
 
@@ -69,7 +75,7 @@ export interface QueryOptions {
   pageSize?: number;
   // hard cap on store pages to scan
   maxPages?: number;
-  // include transaction IDs in the returned log entries
+  // Include exact transaction IDs where the history response exposes them.
   includeTxid?: boolean;
 }
 

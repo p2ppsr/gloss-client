@@ -1,7 +1,7 @@
 {
   "name": "gloss-client",
-  "version": "0.4.11",
-  "description": "Global developer logging SDK with individual UTXO architecture for granular log management on BSV blockchain",
+  "version": "0.4.12",
+  "description": "Global developer logging SDK backed by per-controller daily BSV spend chains",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -21,7 +21,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "prepublishOnly": "npm run build",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "keywords": [
     "bsv",
@@ -36,7 +36,7 @@
   "license": "Open BSV License",
   "repository": {
     "type": "git",
-    "url": "https://github.com/p2ppsr/gloss-logs.git"
+    "url": "https://github.com/p2ppsr/gloss-client.git"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
