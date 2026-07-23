@@ -43,6 +43,6 @@
     "typescript": "^5.5.4"
   },
   "dependencies": {
-    "@bsv/sdk": "^2.1.7"
+    "@bsv/sdk": "2.1.9"
   }
 }
